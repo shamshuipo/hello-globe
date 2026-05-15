@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive Globe</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Scene setup ──────────────────────────────────────────────
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 3.5;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// ── Lighting ─────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0x333333));
+const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+sun.position.set(5, 3, 5);
+scene.add(sun);
+
+// ── Stars ────────────────────────────────────────────────────
+const starsGeo = new THREE.BufferGeometry();
+const starCount = 1500;
+const positions = new Float32Array(starCount * 3);
+for (let i = 0; i < starCount; i++) {
+  positions[i * 3]     = (Math.random() - 0.5) * 40;
+  positions[i * 3 + 1] = (Math.random() - 0.5) * 40;
+  positions[i * 3 + 2] = (Math.random() - 0.5) * 40;
+}
+starsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+const stars = new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.02 }));
+scene.add(stars);
+
+// ── Globe ────────────────────────────────────────────────────
+const globeGroup = new THREE.Group();
+scene.add(globeGroup);
+
+const geometry = new THREE.SphereGeometry(1, 64, 64);
+const textureLoader = new THREE.TextureLoader();
+const earthMap = textureLoader.load(
+  'https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg'
+);
+const material = new THREE.MeshPhongMaterial({
+  map: earthMap,
+  specular: 0x111111,
+  shininess: 5,
+});
+const globe = new THREE.Mesh(geometry, material);
+globeGroup.add(globe);
+
+// ── Atmosphere glow ──────────────────────────────────────────
+const glowGeo = new THREE.SphereGeometry(1.015, 64, 64);
+const glowMat = new THREE.ShaderMaterial({
+  uniforms: {},
+  vertexShader: /* glsl */ `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    void main() {
+      vec4 worldPos = modelMatrix * vec4(position, 1.0);
+      vNormal = normalize(mat3(modelMatrix) * normal);
+      vPosition = worldPos.xyz;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    void main() {
+      vec3 viewDir = normalize(cameraPosition - vPosition);
+      float rim = 1.0 - abs(dot(viewDir, vNormal));
+      float glow = pow(rim, 3.0) * 0.4;
+      gl_FragColor = vec4(0.3, 0.6, 1.0, glow);
+    }
+  `,
+  transparent: true,
+  depthWrite: false,
+});
+const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+globeGroup.add(glowMesh);
+
+// ── Interaction state ────────────────────────────────────────
+let isDragging = false;
+let prevMouse = { x: 0, y: 0 };
+let velocity = { x: 0, y: 0 };
+const autoRotateSpeed = 0.15;
+
+// Zoom state
+let targetZoom = 3.5;
+const zoomMin = 1.8;
+const zoomMax = 8.0;
+let prevPinchDist = 0;
+
+function getClientPos(e) {
+  return {
+    x: e.touches ? e.touches[0].clientX : e.clientX,
+    y: e.touches ? e.touches[0].clientY : e.clientY,
+  };
+}
+
+function pinchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function onStart(e) {
+  e.preventDefault();
+  const touches = e.touches;
+  if (touches && touches.length === 2) {
+    // Pinch start — record initial distance
+    prevPinchDist = pinchDist(touches);
+    return;
+  }
+  isDragging = true;
+  const pos = getClientPos(e);
+  prevMouse.x = pos.x;
+  prevMouse.y = pos.y;
+  velocity.x = 0;
+  velocity.y = 0;
+}
+
+function onMove(e) {
+  e.preventDefault();
+  const touches = e.touches;
+  if (touches && touches.length === 2) {
+    // Pinch zoom
+    const dist = pinchDist(touches);
+    if (prevPinchDist > 0) {
+      const scale = prevPinchDist / dist;
+      targetZoom = Math.min(zoomMax, Math.max(zoomMin, targetZoom * scale));
+    }
+    prevPinchDist = dist;
+    return;
+  }
+  if (!isDragging) return;
+  const pos = getClientPos(e);
+  const dx = pos.x - prevMouse.x;
+  const dy = pos.y - prevMouse.y;
+
+  const sensitivity = 0.005;
+  globeGroup.rotateOnWorldAxis(
+    new THREE.Vector3(0, 1, 0),
+    dx * sensitivity
+  );
+  globeGroup.rotateOnWorldAxis(
+    new THREE.Vector3(1, 0, 0),
+    dy * sensitivity
+  );
+
+  velocity.x = dx * sensitivity;
+  velocity.y = dy * sensitivity;
+
+  prevMouse.x = pos.x;
+  prevMouse.y = pos.y;
+}
+
+function onEnd() {
+  isDragging = false;
+  prevPinchDist = 0;
+}
+
+// Wheel zoom (desktop)
+renderer.domElement.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  targetZoom = Math.min(zoomMax, Math.max(zoomMin, targetZoom + e.deltaY * 0.01));
+}, { passive: false });
+
+renderer.domElement.addEventListener('mousedown', onStart);
+window.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onEnd);
+renderer.domElement.addEventListener('touchstart', onStart, { passive: false });
+window.addEventListener('touchmove', onMove, { passive: false });
+window.addEventListener('touchend', onEnd);
+
+// Prevent context menu on long-press (mobile)
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+
+// ── Resize handler ───────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Animation loop ───────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.1);
+
+  if (isDragging) {
+    // user is dragging — no auto-rotation, velocity captured in onMove
+  } else {
+    // Apply inertia or auto-rotation
+    const decay = 0.95;
+    velocity.x *= decay;
+    velocity.y *= decay;
+
+    if (Math.abs(velocity.x) > 1e-5 || Math.abs(velocity.y) > 1e-5) {
+      globeGroup.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), velocity.x);
+      globeGroup.rotateOnWorldAxis(new THREE.Vector3(1, 0, 0), velocity.y);
+    } else {
+      // Auto-rotate around Y axis
+      globeGroup.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), autoRotateSpeed * dt);
+    }
+  }
+
+  // Smooth zoom
+  camera.position.z += (targetZoom - camera.position.z) * 0.1;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+</script>
+</body>
+</html>
